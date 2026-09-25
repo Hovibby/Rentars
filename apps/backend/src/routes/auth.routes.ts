@@ -1,11 +1,12 @@
 import { Router } from 'express';
-import { login, register, requestReset, confirmReset, refreshAccessToken, logout, logoutAllDevices } from '@/controllers/auth.controller.js';
+import { login, register, requestReset, confirmReset, refreshAccessToken, logout, logoutAllDevices, verifyEmailHandler } from '@/controllers/auth.controller.js';
 import { walletChallenge, walletVerify } from '@/controllers/wallet.controller.js';
 import {
   loginSchema,
   registerSchema,
   requestPasswordResetSchema,
   confirmPasswordResetSchema,
+  verifyEmailSchema,
   walletChallengeSchema,
   walletVerifySchema,
   validateBody,
@@ -30,6 +31,9 @@ router.post('/logout', logout);
 
 // POST /api/v1/auth/logout-all-devices — revoke all refresh tokens for user
 router.post('/logout-all-devices', authMiddleware, logoutAllDevices);
+
+// POST /api/v1/auth/verify-email — confirm email address with token
+router.post('/verify-email', validateBody(verifyEmailSchema), verifyEmailHandler);
 
 // POST /api/v1/auth/password-reset/request — CAPTCHA required
 router.post('/password-reset/request', authRateLimiter, validateBody(requestPasswordResetSchema), captchaMiddleware, requestReset);

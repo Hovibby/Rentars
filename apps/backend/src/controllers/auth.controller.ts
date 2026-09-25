@@ -7,6 +7,7 @@ import {
   verifyWalletChallenge,
   requestPasswordReset,
   confirmPasswordReset,
+  verifyEmail,
 } from '@/services/auth.service.js';
 import { consumeRefreshToken, revokeRefreshToken, revokeAllUserRefreshTokens } from '@/services/refreshToken.service.js';
 import { securityLogger } from '@/services/logging.service.js';
@@ -58,6 +59,19 @@ export async function walletVerify(req: Request, res: Response): Promise<void> {
     const { stellar_address, challenge, signature } = req.body;
     const result = await verifyWalletChallenge(stellar_address, challenge, signature);
     res.json(result.data);
+  } catch (err) {
+    if (err instanceof AuthError) {
+      throw err;
+    }
+    throw err;
+  }
+}
+
+export async function verifyEmailHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const { token } = req.body;
+    await verifyEmail(token);
+    res.json({ message: 'Email verified successfully.' });
   } catch (err) {
     if (err instanceof AuthError) {
       throw err;
