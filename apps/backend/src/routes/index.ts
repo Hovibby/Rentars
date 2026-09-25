@@ -7,6 +7,7 @@ import clientErrorRoutes from './clientError.routes.js';
 import exchangeRateRoutes from './exchangeRate.routes.js';
 import followRoutes from './follow.routes.js';
 import healthRoutes from './health.routes.js';
+import readinessRoutes from './readiness.routes.js';
 import hostRoutes from './host.routes.js';
 import locationRoutes from './location.routes.js';
 import notificationRoutes from './notification.routes.js';
@@ -57,6 +58,7 @@ apiV1.use('/exchange-rates', exchangeRateRoutes);
 apiV1.use('/saved-searches', savedSearchRoutes);
 apiV1.use('/policy', policyRoutes);
 apiV1.use('/privacy', privacyRoutes);
+apiV1.use(readinessRoutes);
 
 router.use('/api/v1', apiV1);
 

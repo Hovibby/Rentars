@@ -7,6 +7,55 @@ on:
     branches: [main, master, develop]
 
 jobs:
+  # ─── Job 0a: Runtime version check (#576) ───────────────────────────────────
+  runtime-check:
+    name: Runtime Version Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Verify runtime versions
+        run: bash scripts/check-engines.sh
+
+      - name: Install root dependencies (frozen lockfile)
+        run: yarn install --frozen-lockfile
+
+      - name: Install backend dependencies (frozen lockfile)
+        working-directory: apps/backend
+        run: bun install --frozen-lockfile
+
+      - name: Install web dependencies (frozen lockfile)
+        working-directory: apps/web
+        run: yarn install --frozen-lockfile
+
+  # ─── Job 0b: Changelog & release validation (#575) ──────────────────────────
+  release-validation:
+    name: Changelog & Release Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Validate CHANGELOG.md
+        run: bun run scripts/validate-changelog.ts
+
+      - name: Verify generate-release-manifest runs cleanly
+        run: bun run scripts/generate-release-manifest.ts --version 0.0.0-ci
+
   # ─── Job 1: Validate migration filenames ────────────────────────────────────
   validate-migrations:
     name: Validate Migration Filenames
