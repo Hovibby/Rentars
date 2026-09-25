@@ -13,6 +13,7 @@ import { AuthError, AuthErrorCode } from '@/types/errors.js';
 import { emailService } from './email.service.js';
 import { issueRefreshToken } from './refreshToken.service.js';
 import { securityLogger } from './logging.service.js';
+import { auditLogger } from './auditLogger.service.js';
 import type { ServiceResponse } from './index.js';
 
 const VERIFICATION_TOKEN_EXPIRES_MINUTES = 24 * 60; // 24 hours
@@ -507,6 +508,19 @@ export async function confirmPasswordReset(
   await revokeAllUserRefreshTokens(row.user_id);
 
   await securityLogger.logAuthEvent('password_reset_confirmed', row.user_id);
+
+  // Audit log the password reset
+  await auditLogger.log({
+    actorId: row.user_id,
+    action: 'auth.password_reset_confirm',
+    resourceType: 'auth',
+    resourceId: row.user_id,
+    success: true,
+    meta: {
+      sessionsInvalidated: true,
+      allDevicesLoggedOut: true,
+    },
+  });
 
   return { success: true };
 }
