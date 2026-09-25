@@ -541,3 +541,70 @@ export async function getOccupancyHeatmapHandler(req: Request, res: Response): P
 
   res.json(result.data);
 }
+
+// ─── Draft Management ─────────────────────────────────────────────────────────
+
+export async function createDraftHandler(req: AuthRequest, res: Response): Promise<void> {
+  const userId = req.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { title } = req.body;
+  if (!title || typeof title !== 'string') {
+    res.status(400).json({ error: 'Title is required' });
+    return;
+  }
+
+  const { createDraftProperty } = await import('../services/property.service.js');
+  const result = await createDraftProperty(userId, title);
+
+  if (!result.success) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+
+  res.status(201).json(result.data);
+}
+
+export async function getHostDraftsHandler(req: AuthRequest, res: Response): Promise<void> {
+  const userId = req.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { getHostDrafts, getDraftCompletionStatus } = await import('../services/property.service.js');
+  const result = await getHostDrafts(userId);
+
+  if (!result.success) {
+    res.status(500).json({ error: result.error });
+    return;
+  }
+
+  const draftsWithStatus = result.data.map((draft) => ({
+    ...draft,
+    completion: getDraftCompletionStatus(draft),
+  }));
+
+  res.json(draftsWithStatus);
+}
+
+export async function publishDraftHandler(req: AuthRequest, res: Response): Promise<void> {
+  const userId = req.userId;
+  if (!userId) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const { publishDraft } = await import('../services/property.service.js');
+  const result = await publishDraft(userId, req.params.id);
+
+  if (!result.success) {
+    res.status(400).json({ error: result.error });
+    return;
+  }
+
+  res.json(result.data);
+}

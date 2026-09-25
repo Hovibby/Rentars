@@ -75,6 +75,9 @@ export interface Property {
   // Soft-delete tombstone (migration 00032).
   // NULL = active listing. Non-null = removed by host.
   deleted_at?: string | null;
+  // Draft status (migration 00060) — 'draft', 'active', 'archived'
+  draft_status?: string;
+  publish_at?: string | null;
 }
 
 /**
@@ -1158,4 +1161,156 @@ export async function duplicateProperty(
   ]);
 
   return { success: true, data: newProperty as Property };
+}
+
+// ─── Draft Management ─────────────────────────────────────────────────────────
+
+/**
+ * Create a draft property for a host to fill in incrementally.
+ * Requires only title and owner; other fields can be added later.
+ */
+export async function createDraftProperty(
+  ownerId: string,
+  title: string,
+): Promise<ServiceResponse<Property>> {
+  if (!title || title.trim().length === 0) {
+    return { success: false, error: 'Title is required' };
+  }
+
+  const slug = generateSlug(title.trim());
+  const { data, error } = await supabase
+    .from('properties')
+    .insert({
+      owner_id: ownerId,
+      title: sanitizeShortText(title.trim()),
+      draft_status: 'draft',
+    })
+    .select()
+    .single();
+
+  if (error) {
+    return { success: false, error: error.message };
+  }
+
+  // Bust cache
+  await cache.del('properties:all');
+
+  return { success: true, data: data as Property };
+}
+
+/**
+ * Get all draft properties for a host with completion status.
+ */
+export async function getHostDrafts(
+  ownerId: string,
+): Promise<ServiceResponse<Property[]>> {
+  const { data, error } = await supabase
+    .from('properties')
+    .select('*')
+    .eq('owner_id', ownerId)
+    .eq('draft_status', 'draft')
+    .order('updated_at', { ascending: false });
+
+  if (error) {
+    return { success: false, error: error.message };
+  }
+
+  return { success: true, data: (data ?? []) as Property[] };
+}
+
+/**
+ * Validate that a property has required fields for publication.
+ */
+function validateForPublication(property: Property): string | null {
+  const required = ['title', 'price_per_night', 'city', 'country', 'bedrooms', 'bathrooms', 'max_guests'];
+  for (const field of required) {
+    if (!property[field as keyof Property]) {
+      return `Missing required field: ${field}`;
+    }
+  }
+
+  if (!property.images || property.images.length === 0) {
+    return 'At least one image is required';
+  }
+
+  return null;
+}
+
+/**
+ * Publish a draft property to active listing.
+ * Validates all required fields are present.
+ */
+export async function publishDraft(
+  ownerId: string,
+  propertyId: string,
+): Promise<ServiceResponse<Property>> {
+  const { data: property, error: fetchError } = await supabase
+    .from('properties')
+    .select('*')
+    .eq('id', propertyId)
+    .eq('owner_id', ownerId)
+    .eq('draft_status', 'draft')
+    .single();
+
+  if (fetchError || !property) {
+    return { success: false, error: 'Draft property not found' };
+  }
+
+  const validationError = validateForPublication(property as Property);
+  if (validationError) {
+    return { success: false, error: validationError };
+  }
+
+  const { data: updated, error: updateError } = await supabase
+    .from('properties')
+    .update({ draft_status: 'active', publish_at: new Date().toISOString() })
+    .eq('id', propertyId)
+    .select()
+    .single();
+
+  if (updateError) {
+    return { success: false, error: updateError.message };
+  }
+
+  // Bust caches
+  await Promise.all([
+    cache.del(`property:${propertyId}`),
+    cache.del('properties:all'),
+    cache.del('properties:featured'),
+  ]);
+
+  return { success: true, data: updated as Property };
+}
+
+/**
+ * Get draft completion status as percentage.
+ */
+export function getDraftCompletionStatus(property: Property): {
+  percentage: number;
+  missingFields: string[];
+} {
+  const fields = {
+    title: !!property.title,
+    description: !!property.description,
+    price_per_night: !!property.price_per_night,
+    city: !!property.city,
+    country: !!property.country,
+    address: !!property.address,
+    bedrooms: property.bedrooms !== null && property.bedrooms !== undefined,
+    bathrooms: property.bathrooms !== null && property.bathrooms !== undefined,
+    max_guests: !!property.max_guests,
+    property_type: !!property.property_type,
+    amenities: property.amenities && property.amenities.length > 0,
+    images: property.images && property.images.length > 0,
+  };
+
+  const completed = Object.values(fields).filter(Boolean).length;
+  const total = Object.keys(fields).length;
+  const percentage = Math.round((completed / total) * 100);
+
+  const missingFields = Object.entries(fields)
+    .filter(([_, value]) => !value)
+    .map(([key]) => key);
+
+  return { percentage, missingFields };
 }
