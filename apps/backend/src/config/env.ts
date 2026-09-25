@@ -100,6 +100,22 @@ const envSchema = z.object({
       return n;
     }),
 
+  // ── Booking expiry ────────────────────────────────────────────────────────
+  // Hours before a Pending booking automatically expires (default: 24 h).
+  PENDING_BOOKING_EXPIRY_HOURS: z
+    .string()
+    .default('24')
+    .transform((v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n <= 0) throw new Error('PENDING_BOOKING_EXPIRY_HOURS must be positive');
+      return n;
+    }),
+
+  // ── Calendar feed ─────────────────────────────────────────────────────────
+  // HMAC secret used to sign calendar feed subscription URLs.
+  // Falls back to JWT_SECRET in code when unset.
+  CALENDAR_FEED_SECRET: z.string().optional(),
+
   // ── Body size limits ───────────────────────────────────────────────────────
   // Maximum size for JSON request bodies (Express body-parser format: "1mb", "512kb", etc.)
   // Upload routes (multipart/form-data) are governed by multer limits, not this value.
