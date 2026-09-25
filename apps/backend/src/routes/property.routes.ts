@@ -15,6 +15,9 @@ import {
   getViewStatsHandler,
   getOccupancyHeatmapHandler,
   trackSuggestionAcceptedHandler,
+  createDraftHandler,
+  getHostDraftsHandler,
+  publishDraftHandler,
 } from '@/controllers/property.controller.js';
 import { searchPropertiesEndpoint, searchNearbyEndpoint } from '@/controllers/propertySearch.controller.js';
 import {
@@ -83,6 +86,19 @@ router.get('/:id/views', authenticate, getViewStatsHandler);
 
 // GET /api/v1/properties/:id/occupancy-heatmap  (host-only)
 router.get('/:id/occupancy-heatmap', authenticate, getOccupancyHeatmapHandler);
+
+// ── Draft Management ──────────────────────────────────────────────────────────
+
+// POST /api/v1/properties/draft - create draft
+router.post('/draft', authenticate, createDraftHandler);
+
+// GET /api/v1/properties/drafts - list host's drafts
+router.get('/drafts', authenticate, getHostDraftsHandler);
+
+// PATCH /api/v1/properties/:id/publish - publish draft to active
+router.patch('/:id/publish', authenticate, publishDraftHandler);
+
+// ── Property Management ────────────────────────────────────────────────────────
 
 // POST /api/v1/properties  (requires email verification)
 router.post('/', authenticate, requireEmailVerified, createPropertyHandler);
