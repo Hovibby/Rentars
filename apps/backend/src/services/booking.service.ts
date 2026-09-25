@@ -72,6 +72,10 @@ export interface BookingModification {
   requested_end: string;
   original_start: string;
   original_end: string;
+  /** Guest count on the booking when the request was created. */
+  original_guest_count?: number | null;
+  /** New guest count being requested; null means no occupancy change. */
+  requested_guest_count?: number | null;
   status: string;
   requested_by: string;
   reason?: string;
@@ -99,6 +103,8 @@ export interface RequestModificationInput {
   tenant_id: string;
   requested_start: string;
   requested_end: string;
+  /** Optional occupancy change; validated against property max_guests. */
+  guest_count?: number;
   reason?: string;
 }
 
@@ -1465,6 +1471,7 @@ export class BookingService {
     requestedStart: string,
     requestedEnd: string,
     reason?: string,
+    guestCount?: number,
   ): Promise<ServiceResponse<BookingModification>> {
     if (!bookingId) {
       return { success: false, error: 'Booking ID is required' };
@@ -1487,7 +1494,7 @@ export class BookingService {
 
     const { data: bookingData, error: fetchError } = await supabase
       .from('bookings')
-      .select('*, properties!inner(owner_id, check_in_time, check_out_time, min_nights, max_nights)')
+      .select('*, properties!inner(owner_id, check_in_time, check_out_time, min_nights, max_nights, max_guests)')
       .eq('id', bookingId)
       .single();
 
@@ -1502,6 +1509,7 @@ export class BookingService {
         check_out_time?: string;
         min_nights?: number;
         max_nights?: number | null;
+        max_guests?: number | null;
       };
     };
 
@@ -1540,6 +1548,20 @@ export class BookingService {
       };
     }
 
+    // Guest-count validation (only when the caller requests an occupancy change)
+    if (guestCount !== undefined && guestCount !== null) {
+      if (!Number.isFinite(guestCount) || !Number.isInteger(guestCount) || guestCount < 1) {
+        return { success: false, error: 'guest_count must be a positive integer' };
+      }
+      const maxGuests = booking.properties?.max_guests;
+      if (maxGuests !== undefined && maxGuests !== null && guestCount > maxGuests) {
+        return {
+          success: false,
+          error: `Guest count (${guestCount}) exceeds property capacity (${maxGuests})`,
+        };
+      }
+    }
+
     if (booking.properties?.check_in_time && booking.properties?.check_out_time) {
       const { data: sameDayBooking } = await supabase
         .from('bookings')
@@ -1570,14 +1592,16 @@ export class BookingService {
     const { data: modification, error: insertError } = await supabase
       .from('booking_modifications')
       .insert({
-        booking_id: bookingId,
-        requested_start: requestedStart,
-        requested_end: requestedEnd,
-        original_start: booking.check_in,
-        original_end: booking.check_out,
-        status: 'pending',
-        requested_by: tenantId,
-        reason: reason ?? null,
+        booking_id:            bookingId,
+        requested_start:       requestedStart,
+        requested_end:         requestedEnd,
+        original_start:        booking.check_in,
+        original_end:          booking.check_out,
+        original_guest_count:  booking.guest_count ?? null,
+        requested_guest_count: guestCount ?? null,
+        status:                'pending',
+        requested_by:          tenantId,
+        reason:                reason ?? null,
       })
       .select()
       .single();
@@ -1686,14 +1710,21 @@ export class BookingService {
 
     const newTotalPrice = Math.round(priceResult.data!.total * 100) / 100;
 
+    const bookingPatch: Record<string, unknown> = {
+      check_in:    modification.requested_start,
+      check_out:   modification.requested_end,
+      total_price: newTotalPrice,
+      updated_at:  new Date().toISOString(),
+    };
+
+    // Apply occupancy change if the modification included one
+    if (modification.requested_guest_count !== undefined && modification.requested_guest_count !== null) {
+      bookingPatch.guest_count = modification.requested_guest_count;
+    }
+
     const { data: updatedBooking, error: updateError } = await supabase
       .from('bookings')
-      .update({
-        check_in: modification.requested_start,
-        check_out: modification.requested_end,
-        total_price: newTotalPrice,
-        updated_at: new Date().toISOString(),
-      })
+      .update(bookingPatch)
       .eq('id', bookingId)
       .select()
       .single();
