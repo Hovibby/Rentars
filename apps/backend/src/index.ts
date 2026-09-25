@@ -22,10 +22,12 @@
 import 'dotenv/config'; // must be first import
 import { env } from './config/env.js';
 import express from 'express';
+import cookieParser from 'cookie-parser';
 
 // ── Observability & security middleware ───────────────────────────────────────
 import { securityMiddleware } from './middleware/security.middleware.js';
 import { corsMiddleware } from './middleware/cors.middleware.js';
+import { csrfMiddleware, csrfTokenMiddleware } from './middleware/csrf.middleware.js';
 import {
   requestIdMiddleware,
   requestLoggingMiddleware,
@@ -71,7 +73,10 @@ app.use(corsMiddleware);
 // ── 3. Request-ID injection ───────────────────────────────────────────────────
 app.use(requestIdMiddleware);
 
-// ── 4. Body parsers ───────────────────────────────────────────────────────────
+// ── 4. Cookie parsing (required for CSRF middleware) ───────────────────────────
+app.use(cookieParser());
+
+// ── 5. Body parsers ───────────────────────────────────────────────────────────
 const JSON_BODY_LIMIT = env.JSON_BODY_LIMIT;
 app.use((req, res, next) => {
   // Skip JSON parsing for multipart requests — multer handles those.
@@ -79,28 +84,34 @@ app.use((req, res, next) => {
   express.json({ limit: JSON_BODY_LIMIT })(req, res, next);
 });
 
-// ── 5. Rate limiting ──────────────────────────────────────────────────────────
+// ── 6. CSRF token generation (for safe GET/HEAD/OPTIONS requests) ──────────────
+app.use(csrfTokenMiddleware);
+
+// ── 7. CSRF token validation (for state-changing requests) ────────────────────
+app.use(csrfMiddleware);
+
+// ── 8. Rate limiting ──────────────────────────────────────────────────────────
 app.use(rateLimiter);
 
-// ── 6. Request timeout ────────────────────────────────────────────────────────
+// ── 9. Request timeout ────────────────────────────────────────────────────────
 app.use(timeoutMiddleware);
 
-// ── 7. Structured request logging ─────────────────────────────────────────────
+// ── 10. Structured request logging ─────────────────────────────────────────────
 app.use(requestLoggingMiddleware);
 
-// ── 8. Metrics collection (must be before routes to record all requests) ──────
+// ── 11. Metrics collection (must be before routes to record all requests) ──────
 app.use(metricsMiddleware);
 
-// ── 9. /metrics scrape endpoint ───────────────────────────────────────────────
+// ── 12. /metrics scrape endpoint ───────────────────────────────────────────────
 app.use(metricsRouter);
 
-// ── 10. Application routes ────────────────────────────────────────────────────
+// ── 13. Application routes ────────────────────────────────────────────────────
 app.use(routes);
 
 // ── OpenAPI / Swagger UI docs ─────────────────────────────────────────────────
 setupOpenApiRoutes(app);
 
-// ── 11. Centralised error handler ─────────────────────────────────────────────
+// ── 14. Centralised error handler ─────────────────────────────────────────────
 app.use(errorMiddleware);
 
 // ── Server startup ────────────────────────────────────────────────────────────
