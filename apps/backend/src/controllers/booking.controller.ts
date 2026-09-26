@@ -75,10 +75,11 @@ export async function requestModification(req: Request, res: Response): Promise<
     return;
   }
 
-  const { requested_start, requested_end, reason } = req.body as {
+  const { requested_start, requested_end, reason, guest_count } = req.body as {
     requested_start: string;
     requested_end: string;
     reason?: string;
+    guest_count?: number;
   };
 
   const result = await bookingService.requestModification(
@@ -87,6 +88,7 @@ export async function requestModification(req: Request, res: Response): Promise<
     requested_start,
     requested_end,
     reason,
+    guest_count,
   );
 
   if (!result.success) {
@@ -626,18 +628,25 @@ export async function getBookingReceipt(req: Request, res: Response): Promise<vo
     return;
   }
 
-  let pdfBuffer: Buffer;
-  try {
-    pdfBuffer = generateReceiptPdf(receiptResult.data);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to generate PDF receipt' });
-    return;
+  let pdfBuffer: Buffer | undefined;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      pdfBuffer = generateReceiptPdf(receiptResult.data);
+      break;
+    } catch {
+      if (attempt === 2) {
+        res.status(500).json({ error: 'Failed to generate PDF receipt' });
+        return;
+      }
+    }
   }
 
+  // pdfBuffer is always set here — the loop returns early on the second failure
+  const buf = pdfBuffer!;
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="receipt-${booking.id}.pdf"`);
-  res.setHeader('Content-Length', pdfBuffer.length);
-  res.send(pdfBuffer);
+  res.setHeader('Content-Length', buf.length);
+  res.send(buf);
 }
 
 /**
