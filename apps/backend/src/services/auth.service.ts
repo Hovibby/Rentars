@@ -13,6 +13,7 @@ import { AuthError, AuthErrorCode } from '@/types/errors.js';
 import { emailService } from './email.service.js';
 import { issueRefreshToken } from './refreshToken.service.js';
 import { securityLogger } from './logging.service.js';
+import { auditLogger } from './auditLogger.service.js';
 import type { ServiceResponse } from './index.js';
 
 const VERIFICATION_TOKEN_EXPIRES_MINUTES = 24 * 60; // 24 hours
@@ -339,6 +340,61 @@ export async function verifyWalletChallenge(
   };
 }
 
+// ─── Email verification ───────────────────────────────────────────────────────
+
+/**
+ * Verify an email address using a token sent during registration.
+ * Tokens expire after 24 hours and cannot be reused.
+ * Prior tokens are invalidated after successful use.
+ */
+export async function verifyEmail(rawToken: string): Promise<ServiceResponse<void>> {
+  if (!rawToken) {
+    throw new AuthError(AuthErrorCode.INVALID_CREDENTIALS, 'Verification token is required');
+  }
+
+  const tokenHash = hashToken(rawToken);
+
+  const { data: userData, error: fetchError } = await supabase
+    .from('users')
+    .select('*')
+    .eq('email_verification_token', tokenHash)
+    .single();
+
+  if (fetchError || !userData) {
+    throw new AuthError(AuthErrorCode.INVALID_TOKEN, 'Invalid or unknown verification token');
+  }
+
+  const user = userData as {
+    id: string;
+    email_verified: boolean;
+    email_verification_expires_at: string;
+  };
+
+  // Check if already verified
+  if (user.email_verified) {
+    throw new AuthError(AuthErrorCode.INVALID_TOKEN, 'Email has already been verified');
+  }
+
+  // Check expiration
+  if (new Date(user.email_verification_expires_at) < new Date()) {
+    throw new AuthError(AuthErrorCode.TOKEN_EXPIRED, 'Verification token has expired');
+  }
+
+  // Mark email as verified and clear token
+  await supabase
+    .from('users')
+    .update({
+      email_verified: true,
+      email_verification_token: null,
+      email_verification_expires_at: null,
+    })
+    .eq('id', user.id);
+
+  await securityLogger.logAuthEvent('email_verified', user.id);
+
+  return { success: true };
+}
+
 // ─── Password reset ───────────────────────────────────────────────────────────
 
 const RESET_TOKEN_EXPIRES_MINUTES = 60;
@@ -347,6 +403,7 @@ const RESET_TOKEN_EXPIRES_MINUTES = 60;
  * Request a password reset for the given email.
  * Always returns success to prevent user enumeration — the email is only
  * sent when an account with that address actually exists.
+ * Invalidates all prior reset tokens for the user to prevent replay attacks.
  */
 export async function requestPasswordReset(
   email: string,
@@ -355,10 +412,19 @@ export async function requestPasswordReset(
     throw new AuthError(AuthErrorCode.INVALID_CREDENTIALS, 'Email is required');
   }
 
+  const normalizedEmail = email.toLowerCase().trim();
+
   const { data: userData } = await supabase.auth.admin.listUsers();
-  const user = (userData?.users ?? []).find((u) => u.email === email.toLowerCase().trim());
+  const user = (userData?.users ?? []).find((u) => u.email === normalizedEmail);
 
   if (user) {
+    // Invalidate prior reset tokens for this user (replay prevention)
+    await supabase
+      .from('password_reset_tokens')
+      .update({ consumed_at: new Date().toISOString() })
+      .eq('user_id', user.id)
+      .is('consumed_at', null);
+
     const rawToken = crypto.randomBytes(32).toString('hex');
     const tokenHash = hashToken(rawToken);
     const expiresAt = new Date(Date.now() + RESET_TOKEN_EXPIRES_MINUTES * 60 * 1000);
@@ -369,9 +435,10 @@ export async function requestPasswordReset(
       expires_at: expiresAt.toISOString(),
     });
 
-    await emailService.sendPasswordResetEmail({ to: email, token: rawToken });
+    await emailService.sendPasswordResetEmail({ to: normalizedEmail, token: rawToken });
   }
 
+  // Always return success with same message to prevent email enumeration
   return { success: true };
 }
 
@@ -379,6 +446,7 @@ export async function requestPasswordReset(
  * Confirm a password reset using the raw token received by email.
  * Validates the token, updates the password, consumes the token, and
  * invalidates existing sessions by updating `sessions_invalidated_at`.
+ * Also revokes all refresh tokens to force re-login across all devices.
  */
 export async function confirmPasswordReset(
   rawToken: string,
@@ -423,15 +491,36 @@ export async function confirmPasswordReset(
     throw new AuthError(AuthErrorCode.INVALID_CREDENTIALS, updateError.message);
   }
 
+  // Mark token as consumed
   await supabase
     .from('password_reset_tokens')
     .update({ consumed_at: new Date().toISOString() })
     .eq('id', row.id);
 
+  // Invalidate all sessions for this user
   await supabase
     .from('users')
     .update({ sessions_invalidated_at: new Date().toISOString() })
     .eq('id', row.user_id);
+
+  // Invalidate all refresh tokens for this user across all devices
+  const { revokeAllUserRefreshTokens } = await import('./refreshToken.service.js');
+  await revokeAllUserRefreshTokens(row.user_id);
+
+  await securityLogger.logAuthEvent('password_reset_confirmed', row.user_id);
+
+  // Audit log the password reset
+  await auditLogger.log({
+    actorId: row.user_id,
+    action: 'auth.password_reset_confirm',
+    resourceType: 'auth',
+    resourceId: row.user_id,
+    success: true,
+    meta: {
+      sessionsInvalidated: true,
+      allDevicesLoggedOut: true,
+    },
+  });
 
   return { success: true };
 }

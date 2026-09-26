@@ -3,10 +3,12 @@ import { type Request, type Response, Router } from 'express';
 import adminRoutes from './admin.routes.js';
 import authRoutes from './auth.routes.js';
 import bookingRoutes from './booking.routes.js';
+import calendarFeedRoutes from './calendarFeed.routes.js';
 import clientErrorRoutes from './clientError.routes.js';
 import exchangeRateRoutes from './exchangeRate.routes.js';
 import followRoutes from './follow.routes.js';
 import healthRoutes from './health.routes.js';
+import readinessRoutes from './readiness.routes.js';
 import hostRoutes from './host.routes.js';
 import locationRoutes from './location.routes.js';
 import notificationRoutes from './notification.routes.js';
@@ -46,6 +48,7 @@ apiV1.use('/auth', authRoutes);
 apiV1.use('/admin', adminRoutes);
 apiV1.use('/client-errors', clientErrorRoutes);
 apiV1.use('/bookings', bookingRoutes);
+apiV1.use('/calendar', calendarFeedRoutes);
 apiV1.use('/follows', followRoutes);
 apiV1.use('/host', hostRoutes);
 apiV1.use('/properties', propertyRoutes);
@@ -59,6 +62,7 @@ apiV1.use('/exchange-rates', exchangeRateRoutes);
 apiV1.use('/saved-searches', savedSearchRoutes);
 apiV1.use('/policy', policyRoutes);
 apiV1.use('/privacy', privacyRoutes);
+apiV1.use(readinessRoutes);
 
 router.use('/api/v1', apiV1);
 
