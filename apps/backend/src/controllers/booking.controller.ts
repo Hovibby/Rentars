@@ -1,11 +1,35 @@
+import { createHmac, timingSafeEqual } from 'crypto';
 import type { Request, Response } from 'express';
 import { BookingService } from '@/services/booking.service.js';
 import { getPropertyById } from '@/services/property.service.js';
-import { generateIcs } from '@/utils/ics.js';
+import { generateIcs, generateIcsFeed } from '@/utils/ics.js';
+import type { IcsEventInput } from '@/utils/ics.js';
+import { supabase } from '@/config/supabase.js';
+import { env } from '@/config/env.js';
 import type { AuthRequest } from '@/middleware/auth.middleware.js';
 import type { BookingModification } from '@/services/booking.service.js';
 import { lookup, store, lockKey, completeKey, releaseKey, hashRequestBody } from '@/services/idempotency.service.js';
 import { fetchReceiptData, generateReceiptPdf } from '@/services/receipt.service.js';
+
+function calendarFeedSecret(): string {
+  return env.CALENDAR_FEED_SECRET ?? env.JWT_SECRET;
+}
+
+function generateFeedToken(userId: string): string {
+  return createHmac('sha256', calendarFeedSecret()).update(userId).digest('hex');
+}
+
+function validateFeedToken(token: string, userId: string): boolean {
+  try {
+    const expected = generateFeedToken(userId);
+    const a = Buffer.from(expected, 'hex');
+    const b = Buffer.from(token, 'hex');
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
+}
 
 const bookingService = new BookingService();
 
@@ -402,20 +426,15 @@ export async function getBookingCalendar(req: Request, res: Response): Promise<v
 
   const booking = bookingResult.data;
 
-  // Authorization: only the tenant may download their own calendar event
-  if (!authUser || authUser.id !== booking.tenant_id) {
-    res.status(403).json({ error: 'Forbidden' });
-    return;
-  }
-
   if (!booking.check_in || !booking.check_out) {
     res.status(422).json({ error: 'Booking is missing date information' });
     return;
   }
 
-  // Fetch property details for location and title
+  // Fetch property for location, title, and host ID check
   let propertyTitle = 'Rental Stay';
   let propertyLocation = '';
+  let hostOwnerId: string | undefined;
   if (booking.property_id) {
     const propResult = await getPropertyById(booking.property_id);
     if (propResult.success && propResult.data) {
@@ -423,9 +442,19 @@ export async function getBookingCalendar(req: Request, res: Response): Promise<v
       propertyTitle = p.title ?? propertyTitle;
       const parts = [p.address, p.city, p.country].filter(Boolean);
       propertyLocation = parts.join(', ');
+      hostOwnerId = p.owner_id;
     }
   }
 
+  // Authorization: tenant or host may download
+  const isTenant = authUser?.id === booking.tenant_id;
+  const isHost = !!hostOwnerId && authUser?.id === hostOwnerId;
+  if (!isTenant && !isHost) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
+
+  const isCancelled = booking.status === 'Cancelled' || booking.status === 'Expired';
   const description = [
     `Booking ID: ${booking.id}`,
     `Guests: ${booking.guest_count ?? 1}`,
@@ -443,10 +472,104 @@ export async function getBookingCalendar(req: Request, res: Response): Promise<v
     dtStart: booking.check_in,
     dtEnd: booking.check_out,
     created: booking.created_at,
+    status: isCancelled ? 'CANCELLED' : 'CONFIRMED',
+    sequence: isCancelled ? 1 : 0,
   });
 
   res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="booking-${booking.id}.ics"`);
+  res.send(ics);
+}
+
+/**
+ * GET /api/v1/bookings/calendar-feed-token
+ *
+ * Returns an HMAC-signed token and a ready-to-subscribe calendar feed URL
+ * for the authenticated user. The URL is safe to share with calendar apps
+ * because the token prevents enumeration of other users' feeds.
+ */
+export async function getCalendarFeedToken(req: Request, res: Response): Promise<void> {
+  const authUser = (req as Request & { user?: { id: string } }).user;
+  if (!authUser) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+
+  const token = generateFeedToken(authUser.id);
+  const baseUrl = (req.headers['x-forwarded-proto'] ?? req.protocol) + '://' + req.headers.host;
+  const feedUrl = `${baseUrl}/api/v1/calendar/feed/${authUser.id}/${token}.ics`;
+
+  res.json({ token, feed_url: feedUrl });
+}
+
+/**
+ * GET /api/v1/calendar/feed/:userId/:token.ics  (public — no auth middleware)
+ *
+ * Validates the HMAC token, then returns a full iCalendar feed containing all
+ * bookings (tenant and host) for the given user. Cancelled and expired bookings
+ * are included with STATUS:CANCELLED so calendar clients remove them cleanly.
+ */
+export async function getCalendarFeed(req: Request, res: Response): Promise<void> {
+  const { userId, token } = req.params as { userId: string; token: string };
+
+  // Strip .ics suffix if present (Express won't strip it automatically)
+  const cleanToken = token.replace(/\.ics$/, '');
+
+  if (!validateFeedToken(cleanToken, userId)) {
+    res.status(403).json({ error: 'Invalid or expired calendar feed token' });
+    return;
+  }
+
+  // Fetch all bookings where the user is tenant
+  const { data: tenantBookings } = await supabase
+    .from('bookings')
+    .select('*, properties(title, address, city, country)')
+    .eq('tenant_id', userId)
+    .order('check_in', { ascending: true });
+
+  // Fetch all bookings for properties the user owns
+  const { data: hostBookings } = await supabase
+    .from('bookings')
+    .select('*, properties!inner(title, address, city, country, owner_id)')
+    .eq('properties.owner_id', userId)
+    .neq('tenant_id', userId)
+    .order('check_in', { ascending: true });
+
+  const allBookings = [
+    ...(tenantBookings ?? []),
+    ...(hostBookings ?? []),
+  ];
+
+  const events: IcsEventInput[] = allBookings
+    .filter((b) => b.check_in && b.check_out)
+    .map((b) => {
+      const prop = b.properties as { title?: string; address?: string; city?: string; country?: string } | null;
+      const title = prop?.title ?? 'Rental Stay';
+      const location = [prop?.address, prop?.city, prop?.country].filter(Boolean).join(', ');
+      const isCancelled = b.status === 'Cancelled' || b.status === 'Expired';
+      return {
+        uid: `booking-${b.id}@rentars.app`,
+        summary: `Stay at ${title}`,
+        description: [
+          `Booking ID: ${b.id}`,
+          `Guests: ${b.guest_count ?? 1}`,
+          `Total: ${b.total_price ?? ''} USDC`,
+          `Status: ${b.status ?? ''}`,
+        ].join('\\n'),
+        location,
+        dtStart: b.check_in as string,
+        dtEnd: b.check_out as string,
+        created: b.created_at as string | undefined,
+        status: isCancelled ? 'CANCELLED' : ('CONFIRMED' as const),
+        sequence: isCancelled ? 1 : 0,
+      };
+    });
+
+  const ics = generateIcsFeed(events);
+
+  res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="rentars-calendar.ics"`);
+  res.setHeader('Cache-Control', 'no-store');
   res.send(ics);
 }
 
