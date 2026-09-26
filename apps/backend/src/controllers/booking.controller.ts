@@ -4,6 +4,8 @@ import { getPropertyById } from '@/services/property.service.js';
 import { generateIcs } from '@/utils/ics.js';
 import type { AuthRequest } from '@/middleware/auth.middleware.js';
 import type { BookingModification } from '@/services/booking.service.js';
+import { lookup, store, lockKey, completeKey, releaseKey, hashRequestBody } from '@/services/idempotency.service.js';
+import { fetchReceiptData, generateReceiptPdf } from '@/services/receipt.service.js';
 
 const bookingService = new BookingService();
 
@@ -170,36 +172,76 @@ export async function createBooking(req: Request, res: Response): Promise<void> 
       return;
     }
 
+    const trimmedKey = idempotencyKey.trim();
     const requestHash = hashRequestBody(req.body);
-    const existing = await lookup(userId, idempotencyKey.trim());
 
-    if (!existing.success) {
-      // DB error during lookup — fail safe (let the request proceed without
-      // idempotency protection rather than blocking all bookings)
-      console.error('[idempotency] lookup error:', existing.error);
-    } else if (existing.data !== null) {
-      const record = existing.data;
+    // Atomic claim: win the INSERT race or receive the existing record.
+    const lockResult = await lockKey(userId, trimmedKey, requestHash);
 
-      if (record.request_hash !== requestHash) {
-        // Same key, different payload → 422 Unprocessable Entity
-        res.status(422).json({
-          error:
-            'Idempotency-Key has already been used with a different request payload. ' +
-            'Use a new key for a different booking request.',
-        });
+    if (!lockResult.success) {
+      // DB error during lock — fail safe rather than blocking all bookings.
+      console.error('[idempotency] lock error:', lockResult.error);
+    } else if (lockResult.data) {
+      const lockData = lockResult.data;
+
+      if (!lockData.claimed) {
+        const record = (lockData as { claimed: false; existing: import('@/services/idempotency.service.js').IdempotencyRecord }).existing;
+
+        if (record.request_hash !== requestHash) {
+          // Same key, different payload → reject to prevent silent mutation.
+          res.status(422).json({
+            error:
+              'Idempotency-Key has already been used with a different request payload. ' +
+              'Use a new key for a different booking request.',
+          });
+          return;
+        }
+
+        if (record.status === 'processing') {
+          // Another request is still in flight with the same key.
+          res.status(409).json({
+            error:
+              'A request with this Idempotency-Key is already being processed. ' +
+              'Retry after a short delay.',
+          });
+          return;
+        }
+
+        // Completed record with matching hash → replay.
+        res
+          .status(record.status_code)
+          .set('Idempotent-Replayed', 'true')
+          .json(record.response_body);
         return;
       }
 
-      // Matching key and hash → replay the original response
-      res
-        .status(record.status_code)
-        .set('Idempotent-Replayed', 'true')
-        .json(record.response_body);
+      // We claimed the key — proceed and complete or release on failure.
+      const claimedId = (lockData as { claimed: true; id: string }).id;
+
+      const result = await bookingService.createBooking(req.body);
+
+      if (!result.success) {
+        // Release the processing lock so the caller can retry.
+        await releaseKey(claimedId);
+        const status = result.conflict ? 409 : 400;
+        res.status(status).json({ error: result.error });
+        return;
+      }
+
+      const responseBody = result.data as unknown as Record<string, unknown>;
+      const statusCode = 201;
+
+      const completeResult = await completeKey(claimedId, responseBody, statusCode);
+      if (!completeResult.success) {
+        console.error('[idempotency] complete error:', completeResult.error);
+      }
+
+      res.status(statusCode).json(responseBody);
       return;
     }
   }
 
-  // ── Normal booking creation ─────────────────────────────────────────────────
+  // ── Fallback: no idempotency key provided ───────────────────────────────────
   const result = await bookingService.createBooking(req.body);
 
   if (!result.success) {
@@ -208,20 +250,7 @@ export async function createBooking(req: Request, res: Response): Promise<void> 
     return;
   }
 
-  const responseBody = result.data as Record<string, unknown>;
-  const statusCode = 201;
-
-  // ── Persist idempotency record ──────────────────────────────────────────────
-  if (idempotencyKey && typeof idempotencyKey === 'string' && userId) {
-    const requestHash = hashRequestBody(req.body);
-    const storeResult = await store(userId, idempotencyKey.trim(), requestHash, responseBody, statusCode);
-    if (!storeResult.success) {
-      // Non-fatal: log but still return the booking response
-      console.error('[idempotency] store error:', storeResult.error);
-    }
-  }
-
-  res.status(statusCode).json(responseBody);
+  res.status(201).json(result.data);
 }
 
 /**
